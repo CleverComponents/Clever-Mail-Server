@@ -8,7 +8,7 @@ uses
   clPop3Server, clSmtpFileHandler, clTcpServer, clSmtpServer, clUtils, clUserMgr,
   clLogger, IniFiles, ExtCtrls, clTcpClient, clMC, clSmtp, clSmtpRelay,
   clTcpCommandServer, clMailUserMgr, clTcpClientTls, clTcpCommandClient,
-  clTcpServerTls;
+  clTcpServerTls, Vcl.StdCtrls, Vcl.ComCtrls;
 
 type
   TForm1 = class(TForm)
@@ -20,6 +20,40 @@ type
     clImap4FileHandler1: TclImap4FileHandler;
     clSmtpRelay1: TclSmtpRelay;
     Timer1: TTimer;
+    btnStart: TButton;
+    btnStop: TButton;
+    pcSettings: TPageControl;
+    tsUserAccounts: TTabSheet;
+    tsSmtp: TTabSheet;
+    tsPop3: TTabSheet;
+    tsImap: TTabSheet;
+    pnlLogo: TPanel;
+    imLogoLeft: TImage;
+    imLogoMiggle: TImage;
+    imLogoRight: TImage;
+    lbUsers: TListBox;
+    Label1: TLabel;
+    Label2: TLabel;
+    edtUser: TEdit;
+    edtPassword: TEdit;
+    btnAddUser: TButton;
+    btnDeleteUser: TButton;
+    Label3: TLabel;
+    edtSmtpPort: TEdit;
+    Label4: TLabel;
+    edtMailboxFolder: TEdit;
+    Label5: TLabel;
+    edtPop3Port: TEdit;
+    Label6: TLabel;
+    edtImapPort: TEdit;
+    Label7: TLabel;
+    edtRelayFolder: TEdit;
+    Label8: TLabel;
+    edtBadFolder: TEdit;
+    Label9: TLabel;
+    edtDnsServer: TEdit;
+    Label10: TLabel;
+    edtRelayInterval: TEdit;
     procedure FormCreate(Sender: TObject);
     procedure clReceiveCommand(Sender: TObject;
       AConnection: TclCommandConnection; ACommandParams: TclTcpCommandParams);
@@ -37,17 +71,29 @@ type
       const AText: String);
     procedure clSmtpRelay1ReceiveResponse(Sender: TObject;
       AList: TStrings);
+    procedure btnStartClick(Sender: TObject);
+    procedure btnStopClick(Sender: TObject);
+    procedure lbUsersClick(Sender: TObject);
+    procedure btnAddUserClick(Sender: TObject);
+    procedure btnDeleteUserClick(Sender: TObject);
+    procedure edtUserChange(Sender: TObject);
   private
-    FBadPath: string;
-    procedure LoadImap(Ini: TIniFile);
-    procedure LoadPop3(Ini: TIniFile);
-    procedure LoadSmtp(Ini: TIniFile);
-    procedure LoadRelay(Ini: TIniFile);
+    FUserAccounts: TclMailUserAccountList;
+    FUserAccountChanging: Boolean;
+
     function GetSettingsFile: string;
-    function GetSmtpSettingsFile(Ini: TIniFile): string;
-    function GetMailBoxDir(Ini: TIniFile): string;
-    procedure SaveSmtp(Ini: TIniFile);
+    function GetSmtpSettingsFile: string;
     function GetLogFile: string;
+
+    procedure LoadSmtpCounter;
+    procedure SaveSmtpCounter;
+
+    procedure LoadSettings;
+    procedure SaveSettings;
+    procedure UpdateSettings;
+
+    procedure UpdateControls(AStarted: Boolean);
+
     procedure ProcessBounces(const AMessageFile: string);
     procedure ExtractRelayTo(AEnvelope, AMailToList: TStrings);
     procedure CopyMessageFile(AStatus: TclSmtpRelayStatus; const ACopyFrom, ACopyTo: string);
@@ -70,83 +116,134 @@ begin
   Result := AddTrailingBackSlash(ExtractFilePath(ParamStr(0))) + 'settings.ini';
 end;
 
-function TForm1.GetMailBoxDir(Ini: TIniFile): string;
+function TForm1.GetSmtpSettingsFile: string;
 begin
-  Result := Ini.ReadString('MAILBOX', 'MailboxDir', 'C:\CleverMailBox');
+  Result := AddTrailingBackSlash(edtMailboxFolder.Text) + 'smtp.dat';
 end;
 
-function TForm1.GetSmtpSettingsFile(Ini: TIniFile): string;
+procedure TForm1.lbUsersClick(Sender: TObject);
+var
+  account: TclMailUserAccountItem;
 begin
-  Result := AddTrailingBackSlash(GetMailBoxDir(Ini)) + 'smtp.dat';
+  FUserAccountChanging := True;
+  try
+    if (lbUsers.ItemIndex > -1) then
+    begin
+      account := lbUsers.Items.Objects[lbUsers.ItemIndex] as TclMailUserAccountItem;
+      edtUser.Text := account.UserName;
+      edtPassword.Text := account.Password;
+    end else
+    begin
+      edtUser.Text := '';
+      edtPassword.Text := '';
+    end;
+  finally
+    FUserAccountChanging := False;
+  end;
 end;
 
 procedure TForm1.FormCreate(Sender: TObject);
-var
-  ini: TIniFile;
 begin
+  FUserAccounts := TclMailUserAccountList.Create(Self, TclMailUserAccountItem);
+
   TclLogger.Instance().SetLogMessageFile(GetLogFile());
-
-  if not FileExists(GetSettingsFile()) then
-  begin
-    ShowMessage(GetSettingsFile() + ' does not exist');
-    Halt;
-  end;
-
-  ini := TIniFile.Create(GetSettingsFile());
-  try
-    LoadSmtp(ini);
-    LoadPop3(ini);
-    LoadImap(ini);
-    LoadRelay(ini);
-  finally
-    ini.Free();
-  end;
-
-  ForceFileDirectories(AddTrailingBackSlash(clSmtpFileHandler1.MailBoxDir));
-  ForceFileDirectories(AddTrailingBackSlash(clSmtpFileHandler1.RelayDir));
-  ForceFileDirectories(AddTrailingBackSlash(FBadPath));
-
-  clSmtpServer1.Start();
-  clPop3Server1.Start();
-  clImap4Server1.Start();
-  Timer1.Enabled := True;
+  UpdateControls(False);
+  LoadSettings();
 end;
 
-procedure TForm1.LoadSmtp(Ini: TIniFile);
+procedure TForm1.LoadSettings;
 var
   i, cnt: Integer;
-  counter: TIniFile;
+  ini: TIniFile;
   account: TclMailUserAccountItem;
 begin
-  clSmtpServer1.Port := Ini.ReadInteger('SMTP', 'Port', 25);
+  if FileExists(GetSettingsFile()) then
+  begin
+    ini := TIniFile.Create(GetSettingsFile());
+    try
+      edtRelayInterval.Text := IntToStr(Ini.ReadInteger('SMTP', 'RelayInterval', 5000));
+      edtSmtpPort.Text := IntToStr(Ini.ReadInteger('SMTP', 'Port', 25));
+      edtDnsServer.Text := Ini.ReadString('SMTP', 'DnsServer', '');
+      edtRelayFolder.Text := Ini.ReadString('SMTP', 'RelayDir', 'C:\CleverMailBox\RelayQueue');
+      edtBadFolder.Text := Ini.ReadString('SMTP', 'BadDir', 'C:\CleverMailBox\Bad');
 
-  clSmtpFileHandler1.MailBoxDir := GetMailBoxDir(Ini);
-  clSmtpFileHandler1.RelayDir := Ini.ReadString('SMTP', 'RelayDir', 'C:\CleverMailBox\RelayQueue');
+      edtMailboxFolder.Text := Ini.ReadString('MAILBOX', 'MailboxDir', 'C:\CleverMailBox');
 
-  counter := TIniFile.Create(GetSmtpSettingsFile(Ini));
+      edtPop3Port.Text := IntToStr(Ini.ReadInteger('POP3', 'Port', 110));
+
+      edtImapPort.Text := IntToStr(Ini.ReadInteger('IMAP', 'Port', 143));
+
+      lbUsers.Items.Clear();
+
+      cnt := Ini.ReadInteger('USERS', 'Count', 0);
+      for i := 0 to cnt - 1 do
+      begin
+        account := FUserAccounts.Add();
+
+        account.UserName := Ini.ReadString('USER' + IntToStr(i), 'UserName', '');
+        account.Password := Ini.ReadString('USER' + IntToStr(i), 'Password', '');
+        account.Email := account.UserName;
+
+        lbUsers.Items.AddObject(account.UserName, account);
+      end;
+    finally
+      ini.Free();
+    end;
+  end;
+end;
+
+procedure TForm1.LoadSmtpCounter;
+var
+  counter: TIniFile;
+begin
+  counter := TIniFile.Create(GetSmtpSettingsFile());
   try
     clSmtpFileHandler1.Counter := counter.ReadInteger('SMTP', 'Counter', 1);
   finally
     counter.Free();
   end;
+end;
 
-  clSmtpServer1.UserAccounts.Clear();
-  cnt := Ini.ReadInteger('USERS', 'Count', 0);
-  for i := 0 to cnt - 1 do
-  begin
-    account := clSmtpServer1.UserAccounts.Add();
+procedure TForm1.SaveSettings;
+var
+  i: Integer;
+  ini: TIniFile;
+  account: TclMailUserAccountItem;
+begin
+  ini := TIniFile.Create(GetSettingsFile());
+  try
+    Ini.WriteInteger('SMTP', 'RelayInterval', StrToIntDef(edtRelayInterval.Text, 5000));
+    Ini.WriteInteger('SMTP', 'Port', StrToIntDef(edtSmtpPort.Text, 25));
+    Ini.WriteString('SMTP', 'DnsServer', edtDnsServer.Text);
+    Ini.WriteString('SMTP', 'RelayDir', edtRelayFolder.Text);
+    Ini.WriteString('SMTP', 'BadDir', edtBadFolder.Text);
 
-    account.UserName := Ini.ReadString('USER' + IntToStr(i), 'UserName', '');
-    account.Password := Ini.ReadString('USER' + IntToStr(i), 'Password', '');
-    account.Email := Ini.ReadString('USER' + IntToStr(i), 'Email', '');
+    Ini.WriteString('MAILBOX', 'MailboxDir', edtMailboxFolder.Text);
+
+    Ini.WriteInteger('POP3', 'Port', StrToIntDef(edtPop3Port.Text, 110));
+
+    Ini.WriteInteger('IMAP', 'Port', StrToIntDef(edtImapPort.Text, 143));
+
+    Ini.WriteInteger('USERS', 'Count', FUserAccounts.Count);
+    for i := 0 to FUserAccounts.Count - 1 do
+    begin
+      account := FUserAccounts[i];
+
+      Ini.WriteString('USER' + IntToStr(i), 'UserName', account.UserName);
+      Ini.WriteString('USER' + IntToStr(i), 'Password', account.Password);
+    end;
+  finally
+    ini.Free();
   end;
 end;
 
-procedure TForm1.SaveSmtp(Ini: TIniFile);
+procedure TForm1.SaveSmtpCounter;
 var
   counter: TIniFile;
 begin
-  counter := TIniFile.Create(GetSmtpSettingsFile(Ini));
+  if not DirectoryExists(ExtractFilePath(GetSmtpSettingsFile())) then Exit;
+
+  counter := TIniFile.Create(GetSmtpSettingsFile());
   try
     counter.WriteInteger('SMTP', 'Counter', clSmtpFileHandler1.Counter);
   finally
@@ -154,49 +251,55 @@ begin
   end;
 end;
 
-procedure TForm1.LoadPop3(Ini: TIniFile);
+procedure TForm1.btnAddUserClick(Sender: TObject);
 var
-  i, cnt: Integer;
-  account: TclUserAccountItem;
+  account: TclMailUserAccountItem;
 begin
-  clPop3Server1.Port := Ini.ReadInteger('POP3', 'Port', 110);
-  clPop3FileHandler1.MailBoxDir := GetMailBoxDir(Ini);
+  FUserAccountChanging := True;
+  try
+    account := FUserAccounts.Add();
+    account.UserName := 'New User';
+    lbUsers.Items.AddObject(account.UserName, account);
+    lbUsers.ItemIndex := lbUsers.Items.Count - 1;
 
-  clPop3Server1.UserAccounts.Clear();
-  cnt := Ini.ReadInteger('USERS', 'Count', 0);
-  for i := 0 to cnt - 1 do
-  begin
-    account := clPop3Server1.UserAccounts.Add();
-
-    account.UserName := Ini.ReadString('USER' + IntToStr(i), 'UserName', '');
-    account.Password := Ini.ReadString('USER' + IntToStr(i), 'Password', '');
+    lbUsersClick(nil);
+  finally
+    FUserAccountChanging := False;
   end;
 end;
 
-procedure TForm1.LoadImap(Ini: TIniFile);
-var
-  i, cnt: Integer;
-  account: TclUserAccountItem;
+procedure TForm1.btnDeleteUserClick(Sender: TObject);
 begin
-  clImap4Server1.Port := Ini.ReadInteger('IMAP', 'Port', 143);
-  clImap4FileHandler1.MailBoxDir := GetMailBoxDir(Ini);
+  FUserAccountChanging := True;
+  try
+    if (lbUsers.ItemIndex > -1) then
+    begin
+      FUserAccounts.Delete(lbUsers.ItemIndex);
+      lbUsers.Items.Delete(lbUsers.ItemIndex);
+      lbUsers.ItemIndex := -1;
 
-  clImap4Server1.UserAccounts.Clear();
-  cnt := Ini.ReadInteger('USERS', 'Count', 0);
-  for i := 0 to cnt - 1 do
-  begin
-    account := clImap4Server1.UserAccounts.Add();
-
-    account.UserName := Ini.ReadString('USER' + IntToStr(i), 'UserName', '');
-    account.Password := Ini.ReadString('USER' + IntToStr(i), 'Password', '');
+      lbUsersClick(nil);
+    end;
+  finally
+    FUserAccountChanging := False;
   end;
 end;
 
-procedure TForm1.LoadRelay(Ini: TIniFile);
+procedure TForm1.btnStartClick(Sender: TObject);
 begin
-  clSmtpRelay1.DnsServer := Ini.ReadString('SMTP', 'DnsServer', '');
-  FBadPath := Ini.ReadString('SMTP', 'BadDir', 'C:\CleverMailBox\Bad');
-  Timer1.Interval := Ini.ReadInteger('SMTP', 'RelayInterval', 5000);
+  UpdateControls(True);
+  UpdateSettings();
+  LoadSmtpCounter();
+
+  ForceFileDirectories(AddTrailingBackSlash(clSmtpFileHandler1.MailBoxDir));
+  ForceFileDirectories(AddTrailingBackSlash(clSmtpFileHandler1.RelayDir));
+  ForceFileDirectories(AddTrailingBackSlash(edtBadFolder.Text));
+
+  clSmtpServer1.Start();
+  clPop3Server1.Start();
+  clImap4Server1.Start();
+
+  Timer1.Enabled := True;
 end;
 
 procedure TForm1.clReceiveCommand(Sender: TObject;
@@ -209,6 +312,18 @@ procedure TForm1.clSendResponse(Sender: TObject;
   AConnection: TclCommandConnection; const ACommand, AText: String);
 begin
   clPutLogMessage(Sender, edInside, 'Reply: ' + ACommand);
+end;
+
+procedure TForm1.btnStopClick(Sender: TObject);
+begin
+  Timer1.Enabled := False;
+
+  clImap4Server1.Stop();
+  clPop3Server1.Stop();
+  clSmtpServer1.Stop();
+
+  SaveSmtpCounter();
+  UpdateControls(False);
 end;
 
 procedure TForm1.clAcceptConnection(Sender: TObject; AConnection: TclUserConnection; var Handled: Boolean);
@@ -237,24 +352,9 @@ begin
 end;
 
 procedure TForm1.FormDestroy(Sender: TObject);
-var
-  ini: TIniFile;
 begin
-  Timer1.Enabled := False;
-
-  if FileExists(GetSettingsFile()) then
-  begin
-    ini := TIniFile.Create(GetSettingsFile());
-    try
-      SaveSmtp(ini);
-    finally
-      ini.Free();
-    end;
-  end;
-
-  clImap4Server1.Stop();
-  clPop3Server1.Stop();
-  clSmtpServer1.Stop();
+  btnStopClick(nil);
+  SaveSettings();
 end;
 
 procedure TForm1.clServerStart(Sender: TObject);
@@ -317,6 +417,38 @@ begin
   end;
 end;
 
+procedure TForm1.UpdateSettings;
+begin
+  Timer1.Interval := StrToInt(edtRelayInterval.Text);
+  clSmtpRelay1.DnsServer := edtDnsServer.Text;
+
+  clSmtpServer1.Port := StrToInt(edtSmtpPort.Text);
+  clSmtpServer1.UserAccounts := FUserAccounts;
+
+  clSmtpFileHandler1.MailBoxDir := edtMailboxFolder.Text;
+  clSmtpFileHandler1.RelayDir := edtRelayFolder.Text;
+
+  clPop3Server1.Port := StrToInt(edtPop3Port.Text);
+  clPop3Server1.UserAccounts := FUserAccounts;
+
+  clPop3FileHandler1.MailBoxDir := edtMailboxFolder.Text;
+
+  clImap4Server1.Port := StrToInt(edtImapPort.Text);
+  clImap4Server1.UserAccounts := FUserAccounts;
+
+  clImap4FileHandler1.MailBoxDir := edtMailboxFolder.Text;
+end;
+
+procedure TForm1.UpdateControls(AStarted: Boolean);
+const
+  AppTitle: array[Boolean] of String = ('Clever Mail Server', 'Clever Mail Server - Started');
+begin
+  btnStart.Enabled := not AStarted;
+  btnStop.Enabled := AStarted;
+
+  Caption := AppTitle[AStarted];
+end;
+
 procedure TForm1.ExtractRelayTo(AEnvelope, AMailToList: TStrings);
 var
   i: Integer;
@@ -340,6 +472,22 @@ begin
     [AStatus.ResponseCode, AStatus.ErrorCode, AStatus.ErrorText, ACopyFrom, copyStatus[success]]));
 end;
 
+procedure TForm1.edtUserChange(Sender: TObject);
+var
+  account: TclMailUserAccountItem;
+begin
+  if (lbUsers.ItemIndex > -1) and (not FUserAccountChanging) then
+  begin
+    account := lbUsers.Items.Objects[lbUsers.ItemIndex] as TclMailUserAccountItem;
+
+    account.UserName := edtUser.Text;
+    account.Password := edtPassword.Text;
+    account.Email := account.UserName;
+
+    lbUsers.Items[lbUsers.ItemIndex] := account.UserName;
+  end;
+end;
+
 procedure TForm1.ProcessBounces(const AMessageFile: string);
 var
   i: Integer;
@@ -352,12 +500,12 @@ begin
     if (status.ResponseCode <> 250) or (status.ErrorCode <> 0) then
     begin
       copyFrom := AMessageFile;
-      copyTo := AddTrailingBackSlash(FBadPath) + ExtractFileName(copyFrom);
+      copyTo := AddTrailingBackSlash(edtBadFolder.Text) + ExtractFileName(copyFrom);
 
       CopyMessageFile(status, copyFrom, copyTo);
 
       copyFrom := ChangeFileExt(AMessageFile, cMessageFileExt);
-      copyTo := AddTrailingBackSlash(FBadPath) + ExtractFileName(copyFrom);
+      copyTo := AddTrailingBackSlash(edtBadFolder.Text) + ExtractFileName(copyFrom);
 
       CopyMessageFile(status, copyFrom, copyTo);
 
